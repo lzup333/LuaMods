@@ -1,0 +1,52 @@
+{
+  "pkgId": "lzup.lua.guidemo",
+  "name": "Lua GUI 示范 (GuiDemo)",
+  "author": "lzup333",
+  "version": "1.0.0",
+  "versionCode": 20260929,
+  "brieflyDescribe": "LuaLoader 内置 ImGui 的 GUI 示范",
+  "description": "演示 mod.on_gui + mod.gui（ImGui 即时模式）：文本、滑条、复选框、按钮。",
+  "features": [],
+  "sizeCategory": "TINY",
+  "targetGameVersion": "1.4.5.0",
+  "minGameVersion": "1.4.5.0",
+  "maxGameVersion": "1.4.5.0",
+  "support": {
+    "android": {
+      "arm64": true,
+      "arm": true,
+      "x64": false,
+      "x86": false
+    },
+    "windows": {
+      "arm64": false,
+      "arm": false,
+      "x64": true,
+      "x86": true
+    },
+    "linux": {
+      "arm64": false,
+      "arm": false,
+      "x64": true,
+      "x86": true
+    },
+    "mac": {
+      "arm64": false,
+      "arm": false,
+      "x64": false,
+      "x86": false
+    },
+    "ios": {
+      "arm64": false,
+      "arm": false,
+      "x64": false,
+      "x86": false
+    }
+  },
+  "dependence": [],
+  "conflicts": [],
+  "stableVerified": false,
+  "experimental": true,
+  "deprecated": false,
+  "hasExtendedContent": false
+}
