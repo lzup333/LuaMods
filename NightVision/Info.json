@@ -1,0 +1,52 @@
+{
+  "pkgId": "lzup.lua.nightvision",
+  "name": "夜视 (NightVision)",
+  "author": "lzup333",
+  "version": "2.2.0",
+  "versionCode": 20260922,
+  "brieflyDescribe": "亮堂堂！",
+  "description": "亮堂堂！\n彩色照明模式照亮全屏，其他照明模式照亮周围（PC端只在彩色模式生效）",
+  "features": [],
+  "sizeCategory": "TINY",
+  "targetGameVersion": "1.4.5.8",
+  "minGameVersion": "1.4.5.8",
+  "maxGameVersion": "1.4.5.8",
+  "support": {
+    "android": {
+      "arm64": true,
+      "arm": false,
+      "x64": false,
+      "x86": false
+    },
+    "windows": {
+      "arm64": false,
+      "arm": false,
+      "x64": true,
+      "x86": true
+    },
+    "linux": {
+      "arm64": false,
+      "arm": false,
+      "x64": true,
+      "x86": false
+    },
+    "mac": {
+      "arm64": false,
+      "arm": false,
+      "x64": false,
+      "x86": false
+    },
+    "ios": {
+      "arm64": false,
+      "arm": false,
+      "x64": false,
+      "x86": false
+    }
+  },
+  "dependence": [],
+  "conflicts": [],
+  "stableVerified": true,
+  "experimental": false,
+  "deprecated": false,
+  "hasExtendedContent": true
+}

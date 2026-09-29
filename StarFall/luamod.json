@@ -1,0 +1,8 @@
+{
+  "main": "main.lua",
+  "pkg_id": "lzup.lua.starfall",
+  "version": "2.1.0",
+  "version_code": 1,
+  "api_version": 1,
+  "multiplayer_safe": false
+}

@@ -1,0 +1,8 @@
+{
+  "main": "main.lua",
+  "pkg_id": "lzup.lua.chatcommands",
+  "version": "1.2.0",
+  "version_code": 1,
+  "api_version": 1,
+  "multiplayer_safe": false
+}
