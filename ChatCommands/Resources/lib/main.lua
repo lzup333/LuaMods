@@ -18,6 +18,7 @@
 --
 -- 功能(在游戏聊天框输入指令):
 --   1. /get <物品ID> [数量]     生成对应物品并给予玩家(默认 1 个, 上限 9999, /give 同义)
+--   2. /sp <生物ID> [数量]      在玩家脚下生成对应生物(默认 1 只, 上限 100, /spawn 同义)
 --   2. /god [on|off]            开关无敌模式(置 creativeGodMode, 免疫一切伤害)
 --   3. /time <时:分>            设置游戏内时间(如 /time 12:30, 24 小时制)
 --   4. /heal                    恢复全部生命与法力
@@ -29,7 +30,7 @@
 --           ChatHelper.SendChatMessageFromClient, 通过 ChatMessage.Text 读取文本。
 -- 无敌: postfix Hook Player.ResetEffects, 原版重置后每帧重新置 creativeGodMode=true。
 
-mod.meta = { pkg_id = "lzup.lua.chatcommands", version = "1.2.0" }
+mod.meta = { pkg_id = "lzup.lua.chatcommands", version = "1.3.0" }
 
 local patch = mod.patch
 
@@ -55,6 +56,7 @@ local F_pos, F_width, F_height  -- Player 位置/尺寸(继承自 Entity, Androi
 local M_get_my_player   -- Main.get_myPlayer (Android)
 local M_new_text        -- Main.NewText
 local M_new_item        -- Item.NewItem (Android, 9 参)
+local M_new_npc         -- NPC.NewNPC (10 参: source,X,Y,Type,Start,ai0..3,Target)
 local M_quick_spawn     -- Player.QuickSpawnItem (桌面端, 3 参)
 local M_add_buff        -- Player.AddBuff (3 参)
 local M_get_text        -- ChatMessage.get_Text
@@ -168,6 +170,57 @@ end
 -- ============ 指令处理 ============
 local function handle_command(raw)
     if not raw then return end
+
+    -- ---- /sp、/spawn（/spawn 为别名）----
+    local sp_prefix = nil
+    if starts(raw, "/spawn") and (raw == "/spawn" or raw:sub(8, 8) == " ") then
+        sp_prefix = "/spawn"
+    elseif starts(raw, "/sp") and (raw == "/sp" or raw:sub(4, 4) == " ") then
+        sp_prefix = "/sp"
+    end
+    if sp_prefix then
+        local rest = trim_left(raw:sub(#sp_prefix + 1))
+        if rest == "" then
+            show_chat("[指令助手] 用法: /sp 或 /spawn <生物ID> [数量]")
+            return
+        end
+        local id, e = strtol(rest, 1)
+        if not id or id < 0 or id >= 100000 then
+            show_chat("[指令助手] 无效的生物ID")
+            return
+        end
+        local count = 1
+        if e <= #rest then
+            local c = strtol(rest, e)
+            if c then
+                if c < 1 then c = 1 end
+                if c > 100 then c = 100 end
+                count = math.floor(c)
+            end
+        end
+        if not M_new_npc then
+            show_chat("[指令助手] NPC.NewNPC 解析失败")
+            return
+        end
+        local p = local_player()
+        if not p then return end
+        local px, py = patch.get_field_vec2(F_pos, p)
+        if not px then return end
+        local w = patch.get_field_value(F_width, p, "int32") or 0
+        local h = patch.get_field_value(F_height, p, "int32") or 0
+        local bx = math.floor(px) + math.floor(w / 2)
+        local by = math.floor(py) + math.floor(h)
+        -- NewNPC(source=null, X, Y, Type, Start, ai0..3, Target)
+        -- 每次生成偏移位置，避免全部叠在同一格
+        for i = 0, count - 1 do
+            local sx = bx + (i % 8) * 24 - 84
+            local sy = by + math.floor(i / 8) * 24
+            patch.invoke(M_new_npc, nil, sx, sy, math.floor(id), 0,
+                0.0, 0.0, 0.0, 0.0, 255)
+        end
+        show_chat(string.format("[指令助手] 已生成生物 %d x %d", math.floor(id), count))
+        return
+    end
 
     -- ---- /get、/give ----
     if starts(raw, "/get") or starts(raw, "/give") then
@@ -377,6 +430,8 @@ end
 local function is_mod_command(t)
     if not t then return false end
     return starts(t, "/get") or starts(t, "/give") or starts(t, "/god") or
+        (starts(t, "/sp") and (t == "/sp" or t:sub(4, 4) == " ")) or
+        (starts(t, "/spawn") and (t == "/spawn" or t:sub(8, 8) == " ")) or
         starts(t, "/time") or starts(t, "/heal") or starts(t, "/buff") or
         istarts(t, "/setSpawnRate") or istarts(t, "/setMaxSpawns")
 end
@@ -476,6 +531,16 @@ function setup()
                 or patch.get_method(T_PLAYER, "QuickSpawnItem")
     end
 
+    -- NPC.NewNPC：两端签名相同 (IEntitySource, X, Y, Type, Start, ai0..3, Target)，
+    -- 平台无关，放在分支外解析
+    M_new_npc = patch.get_method(T_NPC, "NewNPC", 10)
+        or patch.get_method_by_names(T_NPC, "NewNPC",
+            { "source", "X", "Y", "Type", "Start", "ai0", "ai1", "ai2", "ai3", "Target" })
+        or patch.get_method(T_NPC, "NewNPC")
+    if not M_new_npc then
+        mod.warn("[sp] 找不到 NPC.NewNPC，/sp 不可用")
+    end
+
     -- Main.myPlayer: 已用 LuaLoader 1.3.0 属性桥接 property_get_method 取 getter;
     -- 取不到回退方法名 get_myPlayer(桌面端另有静态字段 F_my_player 作最终回退)。
     local my_player_prop = patch.get_property(T_MAIN, "myPlayer")
@@ -513,7 +578,7 @@ function setup()
         mod.warn("ResetEffects Hook 未安装(无敌模式不可用)")
     end
 
-    mod.info("初始化完成: /get /god /time /heal /buff /setSpawnRate /setMaxSpawns 可用")
+    mod.info("初始化完成: /get /sp(/spawn) /god /time /heal /buff /setSpawnRate /setMaxSpawns 可用")
 end
 
 function cleanup()
