@@ -1,0 +1,52 @@
+{
+  "pkgId": "lzup.lua.alwaysdrown",
+  "name": "永远溺水 (AlwaysDrown)",
+  "author": "lzup333",
+  "version": "1.0.0",
+  "versionCode": 20261007,
+  "brieflyDescribe": "不戴鱼缸也一直有鱼缸的溺水效果",
+  "description": "Hook Player.CheckDrowning，在原版判定的瞬间把玩家头甲槽临时当作鱼缸，\n让原版溺水逻辑照常运行（氧气条/气泡/扣血/死亡全走原版），实现永远溺水。",
+  "features": [],
+  "sizeCategory": "TINY",
+  "targetGameVersion": "1.4.5.8",
+  "minGameVersion": "1.4.5.8",
+  "maxGameVersion": "1.4.5.8",
+  "support": {
+    "android": {
+      "arm64": true,
+      "arm": true,
+      "x64": false,
+      "x86": false
+    },
+    "windows": {
+      "arm64": false,
+      "arm": false,
+      "x64": true,
+      "x86": true
+    },
+    "linux": {
+      "arm64": false,
+      "arm": false,
+      "x64": true,
+      "x86": false
+    },
+    "mac": {
+      "arm64": false,
+      "arm": false,
+      "x64": false,
+      "x86": false
+    },
+    "ios": {
+      "arm64": false,
+      "arm": false,
+      "x64": false,
+      "x86": false
+    }
+  },
+  "dependence": [],
+  "conflicts": [],
+  "stableVerified": false,
+  "experimental": false,
+  "deprecated": false,
+  "hasExtendedContent": false
+}
