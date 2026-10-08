@@ -10,16 +10,19 @@
 # 说明: 只有 file 模式是交互式。
 #
 # file 模式可选参数（不填则交互提示）:
-#   -n, --name NAME        显示名，如 "自动钓鱼 (AutoFisher)"（交互式会提示填写）
-#   -i, --id PKGID         pkgId，默认 lzup.lua.<文件名小写>
-#   -a, --author AUTHOR    作者，默认 lzup333
-#   -v, --version VER      版本，默认 1.0.0
-#   -b, --brief TEXT       简介（brieflyDescribe）
-#   -d, --desc TEXT        详细描述（description）
-#   -g, --game-version V   目标游戏版本，默认 1.4.5.8
-#       --multiplayer      multiplayer_safe = true（默认 false）
-#       --clean            打包前清空 dist
-#   -h, --help             显示帮助
+#   -n, --name NAME          显示名，如 "自动钓鱼 (AutoFisher)"（交互式会提示填写）
+#   -i, --id PKGID           pkgId，默认 lzup.lua.<文件名小写>
+#   -a, --author AUTHOR      作者，默认 lzup333
+#   -v, --version VER        版本，默认 1.0.0
+#   -b, --brief TEXT         简介（brieflyDescribe）
+#   -d, --desc TEXT          详细描述（description）
+#   -g, --game-version V     目标游戏版本，默认 1.4.5.8（未单独指定 min/max 时作为其默认值）
+#       --min-version V      最低游戏版本（minGameVersion），默认同目标版本
+#       --max-version V      最高游戏版本（maxGameVersion），默认同目标版本
+#       --experimental       标记为实验性（experimental = true，默认 false）
+#       --multiplayer        multiplayer_safe = true（默认 false）
+#       --clean              打包前清空 dist
+#   -h, --help               显示帮助
 #
 # 包名规则: Info.json 的 name(去空格) + v + version.zip
 # ============================================================
@@ -38,6 +41,9 @@ VERSION="1.0.0"
 BRIEF=""
 DESC=""
 GAME_VERSION="1.4.5.8"
+MIN_VERSION=""
+MAX_VERSION=""
+EXPERIMENTAL="false"
 MULTIPLAYER="false"
 CLEAN="false"
 POSITIONALS=()
@@ -46,7 +52,7 @@ POSITIONALS=()
 die() { echo "✗ $*" >&2; exit 1; }
 
 usage() {
-    sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 # 从 Info.json 读取字段（sed，无需 jq）
@@ -79,6 +85,9 @@ parse_common() {
             -b|--brief)        BRIEF="$2"; shift 2 ;;
             -d|--desc)         DESC="$2"; shift 2 ;;
             -g|--game-version) GAME_VERSION="$2"; shift 2 ;;
+            --min-version)     MIN_VERSION="$2"; shift 2 ;;
+            --max-version)     MAX_VERSION="$2"; shift 2 ;;
+            --experimental)    EXPERIMENTAL="true"; shift ;;
             --multiplayer)     MULTIPLAYER="true"; shift ;;
             --clean)           CLEAN="true"; shift ;;
             -h|--help)         usage; exit 0 ;;
@@ -101,12 +110,21 @@ prompt_info() {
     read -rp "版本 version [${VERSION}]: " ans; VERSION="${ans:-$VERSION}"
     read -rp "简介 brieflyDescribe [${BRIEF}]: " ans; BRIEF="${ans:-$BRIEF}"
     read -rp "描述 description [${DESC}]: " ans; DESC="${ans:-$DESC}"
-    read -rp "目标游戏版本 [${GAME_VERSION}]: " ans; GAME_VERSION="${ans:-$GAME_VERSION}"
+    read -rp "目标游戏版本 targetGameVersion [${GAME_VERSION}]: " ans; GAME_VERSION="${ans:-$GAME_VERSION}"
+    read -rp "最低游戏版本 minGameVersion [${MIN_VERSION:-$GAME_VERSION}]: " ans
+    MIN_VERSION="${ans:-${MIN_VERSION:-$GAME_VERSION}}"
+    read -rp "最高游戏版本 maxGameVersion [${MAX_VERSION:-$GAME_VERSION}]: " ans
+    MAX_VERSION="${ans:-${MAX_VERSION:-$GAME_VERSION}}"
+    read -rp "是否为实验性 experimental (true/false) [${EXPERIMENTAL}]: " ans
+    EXPERIMENTAL="${ans:-$EXPERIMENTAL}"
 }
 
 # 写入 3 个元数据文件到 $1
 write_metadata() {
     local out="$1"
+    local min_v="${MIN_VERSION:-$GAME_VERSION}"
+    local max_v="${MAX_VERSION:-$GAME_VERSION}"
+
     cat > "$out/Info.json" <<EOF
 {
   "pkgId": "$ID",
@@ -119,8 +137,8 @@ write_metadata() {
   "features": [],
   "sizeCategory": "TINY",
   "targetGameVersion": "$GAME_VERSION",
-  "minGameVersion": "$GAME_VERSION",
-  "maxGameVersion": "$GAME_VERSION",
+  "minGameVersion": "$min_v",
+  "maxGameVersion": "$max_v",
   "support": {
     "android": { "arm64": true, "arm": true, "x64": false, "x86": false },
     "windows": { "arm64": false, "arm": false, "x64": true, "x86": true },
@@ -131,7 +149,7 @@ write_metadata() {
   "dependence": [],
   "conflicts": [],
   "stableVerified": false,
-  "experimental": true,
+  "experimental": $EXPERIMENTAL,
   "deprecated": false,
   "hasExtendedContent": false
 }

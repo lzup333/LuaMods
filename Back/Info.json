@@ -1,0 +1,27 @@
+{
+  "pkgId": "lzup.lua.back",
+  "name": "死亡回溯",
+  "author": "lzup333",
+  "version": "1.0.0",
+  "versionCode": 20261008,
+  "brieflyDescribe": "输入/back可回到上次死亡点",
+  "description": "输入/back可回到上次死亡点",
+  "features": [],
+  "sizeCategory": "TINY",
+  "targetGameVersion": "1.4.5.8",
+  "minGameVersion": "1.4.5.8",
+  "maxGameVersion": "1.4.5.8",
+  "support": {
+    "android": { "arm64": true, "arm": true, "x64": false, "x86": false },
+    "windows": { "arm64": false, "arm": false, "x64": true, "x86": true },
+    "linux":   { "arm64": false, "arm": false, "x64": true, "x86": false },
+    "mac":     { "arm64": false, "arm": false, "x64": false, "x86": false },
+    "ios":     { "arm64": false, "arm": false, "x64": false, "x86": false }
+  },
+  "dependence": [],
+  "conflicts": [],
+  "stableVerified": false,
+  "experimental": false,
+  "deprecated": false,
+  "hasExtendedContent": false
+}
