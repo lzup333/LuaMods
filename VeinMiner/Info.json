@@ -2,8 +2,8 @@
   "pkgId": "lzup.lua.veinminer",
   "name": "连锁挖矿 (VeinMiner)",
   "author": "lzup333",
-  "version": "1.2.0",
-  "versionCode": 20260922,
+  "version": "1.3.0",
+  "versionCode": 20261009,
   "brieflyDescribe": "挖矿时自动连锁破坏相连的矿石与宝石脉",
   "description": "破坏矿石或宝石时，自动连锁破坏所有同类型且相连的矿石与宝石。\n仅连锁矿石与宝石，挖石头、泥土等普通方块不触发。",
   "features": [],
@@ -48,5 +48,15 @@
   "stableVerified": true,
   "experimental": false,
   "deprecated": false,
-  "hasExtendedContent": true
+  "hasExtendedContent": true,
+  "settings": [
+    {
+      "key": "chain_types",
+      "title": "连锁方块ID",
+      "description": "会触发连锁的方块ID, 逗号分隔",
+      "type": "STRING",
+      "defaultValue": "6,7,8,9,22,37,56,58,107,108,111,166,167,168,169,204,211,221,222,223,408,63,64,65,66,67,68,178,566",
+      "section": "连锁类型"
+    }
+  ]
 }
