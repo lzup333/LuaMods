@@ -13,62 +13,66 @@
 -- You should have received a copy of the GNU Affero General Public License
 -- along with this program.  If not, see <https://www.gnu.org/licenses/>.
 --
--- LuaLoader 示范 Mod：追踪弹幕 (Homing Projectile)
+-- HomingProjectile (追踪弹幕) —— LuaLoader 版
+-- 由内核(C)版 HomingProjectile (libHomingProjectile.android.arm64.so) 移植, 功能对齐。
 --
--- 思路:
---   Hook Terraria.Projectile.AI() 的 postfix。
---   原版 Update() 里会先调用 AI() 决定本帧速度, 随后 position += velocity,
---   所以在 AI() 执行完之后修改 velocity, 本帧就会立刻生效, 也不会被 AI 覆盖。
+-- 功能:
+--   玩家自己的武器弹幕在飞行中自动朝最近的敌人转向前进, 保持弹幕原有速率不变,
+--   每帧转向 18%。敌对弹幕、召唤物、哨兵、钓鱼浮标、钩爪(以及 aiStyle 61)不处理。
 --
---   对每个"玩家的武器弹幕":
---     1. 先读自身速度, 速度太小(静止)的弹幕不处理;
---     2. 遍历 Main.npc 选择锁定目标, 优先级:
---          Boss > 精英怪(rarity >= elite_min_rarity) > 距离更近 > 总血量(lifeMax)更多;
---     3. 把自己的速度方向朝"目标中心 - 自身中心"方向做一个插值转向(保持原速率),
---        并可选地同步 rotation / netUpdate。
+-- 实现:
+--   Hook Terraria.Projectile.AI() 的 postfix。C 版装的是 prepost hook
+--   patchlib_install_prepost_hook(method, NULL, fn), 即只挂 postfix, 时机一致:
+--   原版 Update() 先调用 AI() 决定本帧速度, 再 position += velocity,
+--   所以在 AI() 之后改 velocity 当帧立即生效, 也不会被 AI() 覆盖。
 --
--- 依赖 LuaLoader 在字段访问上的扩展:
---   mod.patch.get_field_vec2(field, instance) -> x, y   (读写 Vector2)
---   mod.patch.set_field_vec2(field, instance, x, y)
---   mod.patch.array_length / array_at                    (遍历对象数组)
+-- 与 C 版对齐的参数(取自 .so 的常量池):
+--   索敌半径 900 像素(平方比较), 转向系数 0.18, 速度低于 0.5 的弹幕不处理,
+--   与目标中心距离小于 0.001 时跳过, 目标最多复用 12 帧后重新扫描。
+--
+-- 目标判定等价于 C 版 can_target_npc():
+--   active && lifeMax >= 6 && life >= 1 && chaseable && !friendly
+--   && !dontTakeDamage && !immortal
+--
+-- 与 C 版的语义差异:
+--   * C 版用 g_target[whoAmI] 缓存 NPC 索引, Lua 版同样按弹幕槽位(whoAmI)作键、
+--     只缓存索引数值, 不缓存对象句柄, 因此不存在跨帧句柄悬垂问题;
+--   * C 版直接读写字段指针, Lua 版统一走 mod.patch 字段 API;
+--   * C 版读 Main.myPlayer 属性 getter, Lua 版优先静态字段, 取不到再退化为 getter。
 
-mod.meta = { pkg_id = "lzup.lua.homingprojectile", version = "1.0.0" }
+mod.meta = { pkg_id = "lzup.lua.homingprojectile", version = "1.1.0" }
 
 local patch = mod.patch
 
--- ============ 配置 ============
-local cfg = {
-    enabled = true,      -- 总开关
-    range = 5000.0,      -- 索敌半径(像素), 给足够大即可覆盖全屏
-    turn_rate = 0.18,    -- 每帧转向比例(0~1), 越大越"粘人"
-    max_speed = 24.0,    -- 追踪时速度上限(像素/帧)
-    min_speed = 1.0,     -- 低于此速度的弹幕不追踪(避免原地打转)
-    stop_distance = 24.0,-- 距目标过近时停止转向(避免绕圈)
-    rotate = false,      -- 是否让贴图朝向速度方向(会因贴图基准轴不同而偏转, 默认关闭)
-    sync = false,        -- 联机时是否置 netUpdate(单机可关, 减少网络流量)
-    elite_min_rarity = 1,-- rarity >= 此值视为"精英怪"(原版稀有生物标记)
-    retarget_interval = 4,-- 每多少帧重新扫描一次目标(缓存期间只做有效性校验)
-}
+-- ============ 常量 ============
+local TARGET_RANGE2 = 900.0 * 900.0   -- 索敌半径 900 像素
+local TURN_RATE = 0.18                -- 每帧转向比例(0~1)
+local MIN_SPEED = 0.5                 -- 低于此速率的弹幕不追踪(避免原地打转)
+local EPS_LEN = 0.001                 -- 与目标中心的最小距离
+local EPS_SPEED = 0.0001              -- 新速度长度的下限, 低于它就直接采用新速度
+local RETARGET_TICKS = 12             -- 锁定目标最多复用的帧数
+local MIN_NPC_LIFE_MAX = 6            -- 可锁定 NPC 的最低生命上限
+local MAX_PROJECTILE_SLOTS = 1000     -- Main.projectile 槽位数上限
+local EXCLUDED_AI_STYLES = { [7] = true, [61] = true }  -- 钩爪等非武器弹幕
 
 -- ============ 句柄 ============
-local T_PROJECTILE, T_NPC, T_MAIN
+local F_main_npc, F_my_player, M_get_my_player
+local F_proj_active, F_proj_friendly, F_proj_owner, F_proj_ai_style
+local F_proj_bobber, F_proj_minion, F_proj_sentry, F_proj_who_am_i
 local F_pos, F_vel, F_width, F_height
-local F_active, F_friendly, F_hostile, F_minion, F_sentry, F_bobber
-local F_ai_style, F_rotation, F_net_update
-local F_npc_pos, F_npc_width, F_npc_height, F_npc_active
-local F_npc_boss, F_npc_rarity, F_npc_life_max
-local F_npc_chaseable, F_npc_dont_take_damage, F_npc_immortal, F_npc_friendly
-local F_main_npc
+local F_npc_active, F_npc_life, F_npc_life_max, F_npc_chaseable
+local F_npc_friendly, F_npc_dont_take_damage, F_npc_immortal
 
-local npc_array            -- Main.npc (懒加载并缓存)
-local target_cache = {}    -- [弹幕] = { npc = 目标, ttl = 剩余帧数 }
+-- ============ 状态 ============
+local targets, hits = {}, {}    -- [弹幕槽位] = 锁定的 NPC 索引 / 已复用帧数
+local ready = false
+local logged_once = false
 
-local fired = false
+-- ============ 工具函数 ============
 
--- 沿父类链查找字段(Projectile 的 position/velocity/width/height 来自 Entity)
+-- 沿父类链查找字段(Projectile / NPC 的 position 等来自 Entity)
 local function find_field(type_handle, name)
-    local cur = type_handle
-    local guard = 0
+    local cur, guard = type_handle, 0
     while cur and guard < 16 do
         local field = patch.get_field(cur, name)
         if field then return field end
@@ -93,227 +97,236 @@ local function get_int(field, inst, default)
     return value
 end
 
--- 判断是否为"玩家的武器弹幕"
-local function is_player_projectile(p)
-    if not get_bool(F_active, p, false) then return false end
-    if get_bool(F_hostile, p, false) then return false end
-    if not get_bool(F_friendly, p, false) then return false end
-    if get_bool(F_minion, p, false) then return false end
-    if get_bool(F_sentry, p, false) then return false end
-    if get_bool(F_bobber, p, false) then return false end
-    return true
-end
-
--- 取 Main.npc 数组句柄(静态数组对象只需取一次)
+-- Main.npc 数组句柄; 现取现用, 不跨帧缓存
 local function get_npc_array()
-    if npc_array then return npc_array end
     if not F_main_npc then return nil end
-    npc_array = patch.get_field_value(F_main_npc, nil, "object")
-    return npc_array
+    return patch.get_field_value(F_main_npc, nil, "object")
 end
 
--- 目标是否可被锁定。等价于原版 NPC.CanBeChasedBy(), 但只用字段判定,
--- 避免在 Hook 里额外 invoke 方法(更稳、更快):
---   active && chaseable && lifeMax > 5 && !dontTakeDamage && !immortal && !friendly
-local function is_targetable(npc)
-    if not npc then return false end
-    if not get_bool(F_npc_active, npc, false) then return false end
-    if not get_bool(F_npc_chaseable, npc, true) then return false end
-    if get_int(F_npc_life_max, npc, 0) <= 5 then return false end
-    if get_bool(F_npc_dont_take_damage, npc, false) then return false end
-    if get_bool(F_npc_immortal, npc, false) then return false end
-    if get_bool(F_npc_friendly, npc, false) then return false end
-    return true
-end
-
--- 按优先级选择锁定目标: Boss > 精英怪 > 更近 > 血量更多
-local function find_best_target(px, py)
+local function npc_at(idx)
     local arr = get_npc_array()
-    if not arr then return nil end
-
-    local count = patch.array_length(arr)
-    local range2 = cfg.range * cfg.range
-    local best, best_boss, best_elite, best_d2, best_hp
-
-    for i = 0, count - 1 do
-        local npc = patch.array_at(arr, i)
-        if is_targetable(npc) then
-            local nx, ny = patch.get_field_vec2(F_npc_pos, npc)
-            if nx then
-                local nw = get_int(F_npc_width, npc, 0)
-                local nh = get_int(F_npc_height, npc, 0)
-                local cx, cy = nx + nw * 0.5, ny + nh * 0.5
-                local dx, dy = cx - px, cy - py
-                local d2 = dx * dx + dy * dy
-                if d2 <= range2 then
-                    local is_boss = get_bool(F_npc_boss, npc, false)
-                    local is_elite = get_int(F_npc_rarity, npc, 0) >= cfg.elite_min_rarity
-                    local hp = get_int(F_npc_life_max, npc, 0)
-
-                    local better
-                    if not best then
-                        better = true
-                    elseif is_boss ~= best_boss then
-                        better = is_boss
-                    elseif is_elite ~= best_elite then
-                        better = is_elite
-                    elseif d2 ~= best_d2 then
-                        better = d2 < best_d2
-                    else
-                        better = hp > best_hp
-                    end
-
-                    if better then
-                        best, best_boss, best_elite, best_d2, best_hp = npc, is_boss, is_elite, d2, hp
-                    end
-                end
-            end
-        end
-    end
-    return best
+    if not arr or idx < 0 then return nil end
+    return patch.array_at(arr, idx)
 end
 
--- 取锁定目标: 优先用缓存(逐帧校验有效性), 到期或失效则重新扫描
-local function acquire_target(p)
-    local entry = target_cache[p]
-    if entry then
-        entry.ttl = entry.ttl - 1
-        if entry.ttl > 0 and is_targetable(entry.npc) then
-            return entry.npc
-        end
-        target_cache[p] = nil
+-- 本地玩家编号; 失败返回 nil
+local function local_player_id()
+    if F_my_player then
+        return patch.get_field_value(F_my_player, nil, "int32")
+    end
+    if M_get_my_player then
+        return patch.invoke(M_get_my_player)
     end
     return nil
 end
 
--- 把一枚弹幕的速度方向转向锁定目标
-local function steer(p)
-    local vx, vy = patch.get_field_vec2(F_vel, p)
+-- 实体中心(位置 + 尺寸的一半); 位置取不到返回 nil
+local function entity_center(ent)
+    local x, y = patch.get_field_vec2(F_pos, ent)
+    if not x then return nil end
+    return x + get_int(F_width, ent, 0) * 0.5, y + get_int(F_height, ent, 0) * 0.5
+end
+
+-- 等价于 C 版 can_target_npc(): 该 NPC 能否作为追踪目标
+local function can_target(npc)
+    if not npc then return false end
+    if not get_bool(F_npc_active, npc, false) then return false end
+    if get_int(F_npc_life_max, npc, 0) < MIN_NPC_LIFE_MAX then return false end
+    if F_npc_life and get_int(F_npc_life, npc, 0) < 1 then return false end
+    if F_npc_chaseable and not get_bool(F_npc_chaseable, npc, false) then return false end
+    if get_bool(F_npc_friendly, npc, false) then return false end
+    if get_bool(F_npc_dont_take_damage, npc, false) then return false end
+    if get_bool(F_npc_immortal, npc, false) then return false end
+    return true
+end
+
+-- 该 NPC 的中心是否在索敌半径内
+local function in_range(npc, pcx, pcy)
+    local cx, cy = entity_center(npc)
+    if not cx then return false end
+    local dx, dy = cx - pcx, cy - pcy
+    return dx * dx + dy * dy <= TARGET_RANGE2
+end
+
+-- 全表扫描: 取距弹幕中心最近的合法目标, 返回 (索引, 对象); 无目标返回 nil
+local function find_best_target(pcx, pcy)
+    local arr = get_npc_array()
+    if not arr then return nil end
+
+    local count = patch.array_length(arr)
+    local best_index, best_npc, best_dist2
+    for i = 0, count - 1 do
+        local npc = patch.array_at(arr, i)
+        if can_target(npc) then
+            local cx, cy = entity_center(npc)
+            if cx then
+                local dx, dy = cx - pcx, cy - pcy
+                local dist2 = dx * dx + dy * dy
+                if dist2 <= TARGET_RANGE2 and (not best_dist2 or dist2 < best_dist2) then
+                    best_index, best_npc, best_dist2 = i, npc, dist2
+                end
+            end
+        end
+    end
+    return best_index, best_npc
+end
+
+-- 取锁定目标: 优先复用缓存(逐帧校验有效性与距离, 最多复用 RETARGET_TICKS 帧),
+-- 失效或到期限则重新全表扫描
+local function acquire_target(who, pcx, pcy)
+    local index = targets[who]
+    if index then
+        local npc = npc_at(index)
+        if can_target(npc) and in_range(npc, pcx, pcy) then
+            local used = hits[who] or 0
+            if used < RETARGET_TICKS then
+                hits[who] = used + 1
+                return npc
+            end
+        end
+        targets[who], hits[who] = nil, nil
+    end
+
+    local best_index, best_npc = find_best_target(pcx, pcy)
+    if not best_index then return nil end
+    targets[who], hits[who] = best_index, 0
+    return best_npc
+end
+
+-- 把弹幕速度方向朝目标中心插值转向; 只改方向, 速率保持不变
+local function steer(proj, pcx, pcy, npc)
+    local vx, vy = patch.get_field_vec2(F_vel, proj)
     if not vx then return end
     local speed = math.sqrt(vx * vx + vy * vy)
-    if speed < cfg.min_speed then return end
+    if speed < MIN_SPEED then return end
 
-    -- 自身中心
-    local px, py = patch.get_field_vec2(F_pos, p)
-    if not px then return end
-    local pw = get_int(F_width, p, 0)
-    local ph = get_int(F_height, p, 0)
-    px, py = px + pw * 0.5, py + ph * 0.5
+    local cx, cy = entity_center(npc)
+    if not cx then return end
+    local dx, dy = cx - pcx, cy - pcy
+    local len = math.sqrt(dx * dx + dy * dy)
+    if len < EPS_LEN then return end
+    dx, dy = dx / len, dy / len
 
-    -- 锁定目标(带缓存, 避免每帧全表扫描)
-    local npc = acquire_target(p)
-    if not npc then
-        npc = find_best_target(px, py)
-        if not npc then return end
-        -- 加一点抖动, 让各弹幕的重新扫描错开, 避免同一帧集中全表扫描
-        target_cache[p] = { npc = npc, ttl = cfg.retarget_interval + math.random(0, cfg.retarget_interval) }
-    end
-
-    -- 目标中心
-    local tx, ty = patch.get_field_vec2(F_npc_pos, npc)
-    if not tx then return end
-    local nw = get_int(F_npc_width, npc, 0)
-    local nh = get_int(F_npc_height, npc, 0)
-    tx, ty = tx + nw * 0.5, ty + nh * 0.5
-
-    local dx, dy = tx - px, ty - py
-    local dist = math.sqrt(dx * dx + dy * dy)
-    if dist < cfg.stop_distance then return end
-    dx, dy = dx / dist, dy / dist
-
-    -- 单位速度方向朝目标方向插值, 再归一化
-    local ux, uy = vx / speed, vy / speed
-    local nx = ux + (dx - ux) * cfg.turn_rate
-    local ny = uy + (dy - uy) * cfg.turn_rate
-    local nl = math.sqrt(nx * nx + ny * ny)
-    if nl < 1e-6 then
-        nx, ny = dx, dy
+    -- 新速度 = v + (dir * speed - v) * 0.18, 再按原速率归一化
+    local nvx = vx + (dx * speed - vx) * TURN_RATE
+    local nvy = vy + (dy * speed - vy) * TURN_RATE
+    local ns = math.sqrt(nvx * nvx + nvy * nvy)
+    if ns > EPS_SPEED then
+        patch.set_field_vec2(F_vel, proj, speed * (nvx / ns), speed * (nvy / ns))
     else
-        nx, ny = nx / nl, ny / nl
-    end
-
-    local ns = speed
-    if ns > cfg.max_speed then ns = cfg.max_speed end
-    patch.set_field_vec2(F_vel, p, nx * ns, ny * ns)
-
-    if cfg.rotate and F_rotation then
-        patch.set_field_value(F_rotation, p, math.atan(ny, nx), "float")
-    end
-    if cfg.sync and F_net_update then
-        patch.set_field_value(F_net_update, p, true, "bool")
+        patch.set_field_vec2(F_vel, proj, nvx, nvy)
     end
 end
 
 -- ============ Hook: Projectile.AI() postfix ============
-local function on_ai(instance, args, result)
-    if not cfg.enabled or not instance then return end
-    if not is_player_projectile(instance) then return end
+local function on_ai(instance)
+    if not ready or not instance then return end
 
-    -- 排除钩爪(aiStyle 7)等非武器弹幕
-    if get_int(F_ai_style, instance, -1) == 7 then return end
+    -- 过滤出"自己的武器弹幕"
+    if not get_bool(F_proj_active, instance, false) then return end
+    if not get_bool(F_proj_friendly, instance, false) then return end
 
-    if not fired then
-        fired = true
-        mod.info("追踪弹幕已生效")
+    local my_player = local_player_id()
+    if my_player == nil then return end
+    if get_int(F_proj_owner, instance, -1) ~= my_player then return end
+
+    if get_bool(F_proj_bobber, instance, false) then return end   -- 钓鱼浮标
+    if get_bool(F_proj_minion, instance, false) then return end   -- 召唤物
+    if get_bool(F_proj_sentry, instance, false) then return end   -- 哨兵
+    if EXCLUDED_AI_STYLES[get_int(F_proj_ai_style, instance, 0)] then return end
+
+    -- 缓存以弹幕槽位 whoAmI 为键
+    local who = get_int(F_proj_who_am_i, instance, -1)
+    if who < 0 or who >= MAX_PROJECTILE_SLOTS then return end
+
+    -- 自身中心
+    local px, py = entity_center(instance)
+    if not px then return end
+
+    local npc = acquire_target(who, px, py)
+    if not npc then return end
+
+    steer(instance, px, py, npc)
+
+    if not logged_once then
+        logged_once = true
+        mod.info(string.format("追踪弹幕已生效 (whoAmI=%d target=%d)", who, targets[who]))
     end
-
-    steer(instance)
 end
 
 -- ============ 初始化 ============
+local function safe_hook(method, spec, label)
+    if not method then
+        mod.error("安装钩子失败(" .. label .. ")：方法句柄为空")
+        return false
+    end
+    local ok, err = pcall(patch.install_hook, method, spec)
+    if not ok then
+        mod.error("安装钩子失败(" .. label .. ")：" .. tostring(err))
+        return false
+    end
+    return true
+end
+
 function setup()
-    T_PROJECTILE = patch.get_type("Terraria", "Projectile")
-    T_NPC = patch.get_type("Terraria", "NPC")
-    T_MAIN = patch.get_type("Terraria", "Main")
-    if not T_PROJECTILE or not T_NPC or not T_MAIN then
-        mod.error("获取类型失败 (Projectile/NPC/Main)")
+    local t_main = patch.get_type("Terraria", "Main")
+    local t_projectile = patch.get_type("Terraria", "Projectile")
+    local t_npc = patch.get_type("Terraria", "NPC")
+    if not t_main or not t_projectile or not t_npc then
+        mod.error("获取类型失败 (Main/Projectile/NPC)")
         return
     end
 
-    F_pos = find_field(T_PROJECTILE, "position")
-    F_vel = find_field(T_PROJECTILE, "velocity")
-    F_width = find_field(T_PROJECTILE, "width")
-    F_height = find_field(T_PROJECTILE, "height")
+    -- Main.myPlayer: Android 是属性 getter, 桌面是静态字段
+    F_my_player = find_field(t_main, "myPlayer")
+    if not F_my_player then
+        M_get_my_player = patch.get_method(t_main, "get_myPlayer", 0)
+            or patch.get_method(t_main, "get_myPlayer")
+    end
+    F_main_npc = find_field(t_main, "npc")
 
-    F_active = find_field(T_PROJECTILE, "active")
-    F_friendly = find_field(T_PROJECTILE, "friendly")
-    F_hostile = find_field(T_PROJECTILE, "hostile")
-    F_minion = find_field(T_PROJECTILE, "minion")
-    F_sentry = find_field(T_PROJECTILE, "sentry")
-    F_bobber = find_field(T_PROJECTILE, "bobber")
-    F_ai_style = find_field(T_PROJECTILE, "aiStyle")
-    F_rotation = find_field(T_PROJECTILE, "rotation")
-    F_net_update = find_field(T_PROJECTILE, "netUpdate")
+    F_proj_active = find_field(t_projectile, "active")
+    F_proj_friendly = find_field(t_projectile, "friendly")
+    F_proj_owner = find_field(t_projectile, "owner")
+    F_proj_ai_style = find_field(t_projectile, "aiStyle")
+    F_proj_bobber = find_field(t_projectile, "bobber")
+    F_proj_minion = find_field(t_projectile, "minion")
+    F_proj_sentry = find_field(t_projectile, "sentry")
+    F_proj_who_am_i = find_field(t_projectile, "whoAmI")
 
-    F_npc_pos = find_field(T_NPC, "position")
-    F_npc_width = find_field(T_NPC, "width")
-    F_npc_height = find_field(T_NPC, "height")
-    F_npc_active = find_field(T_NPC, "active")
-    F_npc_boss = find_field(T_NPC, "boss")
-    F_npc_rarity = find_field(T_NPC, "rarity")
-    F_npc_life_max = find_field(T_NPC, "lifeMax")
-    F_npc_chaseable = find_field(T_NPC, "chaseable")
-    F_npc_dont_take_damage = find_field(T_NPC, "dontTakeDamage")
-    F_npc_immortal = find_field(T_NPC, "immortal")
-    F_npc_friendly = find_field(T_NPC, "friendly")
-    F_main_npc = find_field(T_MAIN, "npc")
+    F_pos = find_field(t_projectile, "position")
+    F_vel = find_field(t_projectile, "velocity")
+    F_width = find_field(t_projectile, "width")
+    F_height = find_field(t_projectile, "height")
 
-    if not F_vel or not F_pos or not F_active or not F_friendly or
-       not F_npc_pos or not F_npc_active or not F_main_npc then
+    F_npc_active = find_field(t_npc, "active")
+    F_npc_life = find_field(t_npc, "life")
+    F_npc_life_max = find_field(t_npc, "lifeMax")
+    F_npc_chaseable = find_field(t_npc, "chaseable")
+    F_npc_friendly = find_field(t_npc, "friendly")
+    F_npc_dont_take_damage = find_field(t_npc, "dontTakeDamage")
+    F_npc_immortal = find_field(t_npc, "immortal")
+
+    if not F_main_npc or not F_pos or not F_vel or not F_proj_active or
+       not F_proj_friendly or not F_proj_owner or not F_proj_who_am_i or
+       not F_npc_active or not F_npc_life_max then
         mod.error("获取关键字段失败")
         return
     end
-
-    -- AI() 无参
-    local m_ai = patch.get_method(T_PROJECTILE, "AI", 0)
-    if not m_ai then
-        mod.error("获取 Projectile.AI 方法失败")
+    if not F_my_player and not M_get_my_player then
+        mod.error("获取 Main.myPlayer 失败")
         return
     end
 
-    patch.install_hook(m_ai, { postfix = on_ai })
-    mod.info(string.format("成功 Hook Projectile.AI (射程 %.0f, 转向 %.2f, 精英阈值 %d)",
-            cfg.range, cfg.turn_rate, cfg.elite_min_rarity))
+    local m_ai = patch.get_method(t_projectile, "AI", 0)
+        or patch.get_method(t_projectile, "AI")
+    if not safe_hook(m_ai, { postfix = on_ai }, "Projectile.AI") then
+        return
+    end
+
+    ready = true
+    mod.info(string.format("成功 Hook Projectile.AI (索敌 %.0f 像素, 转向 %.2f), 追踪弹幕已启用",
+            math.sqrt(TARGET_RANGE2), TURN_RATE))
 end
 
 todo_list = { "setup" }
