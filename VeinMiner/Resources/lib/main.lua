@@ -29,12 +29,20 @@ VeinMiner - 连锁挖矿 —— LuaLoader (Lua) 版
 - postfix: 最外层且方块确已销毁(type==0)且是连锁类型时, 调用 ChainMine。
 * ChainMine: 以 (ox,oy) 为起点做 4 邻接 BFS, 只连锁与 origin 同类型的方块。
 
+netMode 取值: 0=单机 1=客户端 2=服务端(PC 开房) 3=开房(PE 手机)
+
+联机（服务端权威 RPC）:
+* 客户端检测到矿脉后只发一条请求 (channel="veinmine", payload="x,y,type")；
+  服务端收到后调用本 Mod 的 on_receive，在服务端执行连锁。
+  服务端 KillTile 结果通过原版机制广播给所有客户端。
+* 房主/单机直接在本地连锁（服务端/单机 KillTile 本身就会广播）。
+
 平台差异:
 Android: 用 field_pointer + ptr_deref + mem_read_values 走 TileData 原生数组。
 桌面端: field_pointer 返回 nil, 回退 Framing.GetTileSafely -> Tile.type。
 --]]
 
-mod.meta = { pkg_id = "lzup.lua.veinminer", version = "1.3.0" }
+mod.meta = { pkg_id = "lzup.lua.veinminer", version = "1.4.0" }
 
 local dkjson = require("dkjson")
 local patch = mod.patch
@@ -72,6 +80,8 @@ local f_max_tiles_y                         -- Main.maxTilesY
 local f_tile_type                           -- Tile.type (桌面端托管回退)
 local m_get_tile_safely                     -- Framing.GetTileSafely (桌面端托管回退)
 local m_kill_tile                           -- WorldGen.KillTile
+local f_main_players                        -- Main.player
+local f_player_pos                          -- Player.position
 
 -- ============ Android C 快通道 ============
 local android_fast = false
@@ -86,6 +96,8 @@ local MAX_TILE_INDEX = 0x10000000
 -- ============ 状态 ============
 local kill_depth = 0
 local last_killed_type = 0
+local logged_broadcast = false
+local net_mode = 0        -- 0=单机 1=客户端 2=服务端
 
 -- ============ 工具 ============
 local function find_field(type_handle, name)
@@ -147,9 +159,54 @@ end
 local function call_kill_tile(i, j, fail, effect_only, no_item)
     if not m_kill_tile then return end
     patch.invoke(m_kill_tile, i, j, fail, effect_only, no_item)
+
+    -- 服务端：WorldGen.KillTile 本身不会广播（同步是原版 Player.PickTile 做的），
+    -- 所以连锁掉的每一格都要显式发 TileSquare，否则客户端看不到。
+    local mode = (mod.net and mod.net.mode and mod.net.mode()) or 0
+    if not logged_broadcast then
+        logged_broadcast = true
+        mod.info("chain kill: mode=" .. tostring(mode)
+            .. " tile_square=" .. tostring(mod.net ~= nil and mod.net.tile_square ~= nil))
+    end
+    -- 注意：PC 的开房是 netMode=2，PE(手机) 的开房是 netMode=3
+    if (mode == 2 or mode == 3) and mod.net and mod.net.tile_square then
+        mod.net.tile_square(i, j, 1, 1)
+    end
 end
 
-local function chain_mine(ox, oy, tile_type, no_item)
+-- 服务端反作弊：玩家必须离目标矿格足够近（40 格内）
+local function player_near(player, tx, ty)
+    if player == nil or player < 0 then return false end
+    if not f_main_players or not f_player_pos then return true end
+    local ok, players = pcall(patch.get_field_value, f_main_players, nil, "object")
+    if not ok or not players then return true end
+    local ok2, pl = pcall(patch.array_at, players, player)
+    if not ok2 or not pl then return false end
+    local ok3, px, py = pcall(patch.get_field_vec2, f_player_pos, pl)
+    if not ok3 or not px then return true end
+    return math.abs(px / 16 - tx) <= 40 and math.abs(py / 16 - ty) <= 40
+end
+
+-- 前向声明：on_server_receive 定义在 chain_mine 之前，需要先声明这个局部名
+local chain_mine
+
+-- 服务端：处理客户端的连锁请求
+local function on_server_receive(channel, payload, player)
+    if channel ~= "veinmine" or type(payload) ~= "string" then return end
+    local sx, sy, st = payload:match("^(-?%d+),(-?%d+),(%d+)$")
+    if not sx then return end
+    local x, y, tile_type = tonumber(sx), tonumber(sy), tonumber(st)
+    if not x or not y or not tile_type then return end
+    if not is_vein_type(tile_type) then return end
+    if not player_near(player, x, y) then
+        mod.warn("拒绝越界连锁请求: player=" .. tostring(player)
+            .. " 目标=(" .. x .. "," .. y .. ")")
+        return
+    end
+    chain_mine(x, y, tile_type, false)
+end
+
+chain_mine = function(ox, oy, tile_type, no_item)
     if not m_kill_tile then return end
 
     local queue = { { ox, oy } }
@@ -207,7 +264,15 @@ local function picktile_postfix(instance, args, result)
         if get_tile_type(i, j) == 0 then
             local tile_type = last_killed_type
             if tile_type ~= 0 and tile_type < 4096 and is_vein_type(tile_type) then
-                chain_mine(i, j, tile_type, false)
+                -- 现读模式：启动时还是单机，加入服务器后才是 1
+                local mode = (mod.net and mod.net.mode and mod.net.mode()) or 0
+                if mode == 1 and mod.net and mod.net.send_to_server then
+                    -- 客户端：只发请求，世界修改由服务端权威执行
+                    mod.net.send_to_server("veinmine",
+                        string.format("%d,%d,%d", i, j, tile_type))
+                else
+                    chain_mine(i, j, tile_type, false)
+                end
             end
         end
     end
@@ -267,6 +332,11 @@ function setup()
 
     load_config()
 
+    if mod.net and mod.net.mode then
+        mod.info("联机模式(启动时): " .. tostring(mod.net.mode())
+            .. " (0=单机 1=客户端 2=服务端；加入/退出服务器后会变化)")
+    end
+
     local main_type = patch.get_type("Terraria", "Main")
     local worldgen_type = patch.get_type("Terraria", "WorldGen")
     local player_type = patch.get_type("Terraria", "Player")
@@ -280,6 +350,10 @@ function setup()
 
     f_max_tiles_x = find_field(main_type, "maxTilesX")
     f_max_tiles_y = find_field(main_type, "maxTilesY")
+    f_main_players = find_field(main_type, "player")
+    if player_type then
+        f_player_pos = find_field(player_type, "position")
+    end
     if tile_type then
         f_tile_type = find_field(tile_type, "type")
     end
@@ -325,6 +399,13 @@ function setup()
     if not picktile then
         mod.error("获取 Player.PickTile 方法失败")
         return
+    end
+
+    if mod.net and mod.net.on_receive then
+        mod.net.on_receive(on_server_receive)
+        mod.info("已注册服务端连锁请求处理 (channel=veinmine)")
+    else
+        mod.warn("当前加载器不支持 mod.net.on_receive，联机同步不可用")
     end
 
     safe_hook(picktile, { prefix = picktile_prefix, postfix = picktile_postfix }, "Player.PickTile")
