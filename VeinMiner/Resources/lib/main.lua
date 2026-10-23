@@ -33,7 +33,7 @@ netMode 取值: 0=单机 1=客户端 2=服务端(PC 开房) 3=开房(PE 手机)
 
 联机（服务端权威 RPC）:
 * 客户端检测到矿脉后只发一条请求 (channel="veinmine", payload="x,y,type")；
-  服务端收到后调用本 Mod 的 on_receive，在服务端执行连锁。
+  服务端收到后按频道路由到 mod.net.on 注册的回调，在服务端执行连锁。
   服务端 KillTile 结果通过原版机制广播给所有客户端。
 * 房主/单机直接在本地连锁（服务端/单机 KillTile 本身就会广播）。
 
@@ -42,7 +42,7 @@ Android: 用 field_pointer + ptr_deref + mem_read_values 走 TileData 原生数�
 桌面端: field_pointer 返回 nil, 回退 Framing.GetTileSafely -> Tile.type。
 --]]
 
-mod.meta = { pkg_id = "lzup.lua.veinminer", version = "1.4.1" }
+mod.meta = { pkg_id = "lzup.lua.veinminer", version = "1.4.2" }
 
 local dkjson = require("dkjson")
 local patch = mod.patch
@@ -190,12 +190,12 @@ end
 -- 前向声明：on_server_receive 定义在 chain_mine 之前，需要先声明这个局部名
 local chain_mine
 
--- 服务端：处理客户端的连锁请求
-local function on_server_receive(channel, payload, player)
-    mod.info(("recv: channel=%s payload=%s player=%s"):format(
-        tostring(channel), tostring(payload), tostring(player)))
-    if channel ~= "veinmine" or type(payload) ~= "string" then
-        mod.warn("拒绝: channel/payload 不匹配")
+-- 服务端：处理客户端的连锁请求（已按 "veinmine" 频道注册，channel 不再需要）
+local function on_server_receive(payload, player)
+    mod.info(("recv: payload=%s player=%s"):format(
+        tostring(payload), tostring(player)))
+    if type(payload) ~= "string" then
+        mod.warn("拒绝: payload 不是字符串")
         return
     end
     local sx, sy, st = payload:match("^(-?%d+),(-?%d+),(%d+)$")
@@ -277,9 +277,9 @@ local function picktile_postfix(instance, args, result)
                 local mode = (mod.net and mod.net.mode and mod.net.mode()) or 0
                 mod.info(("mine: type=%d mode=%d has_net=%s"):format(
                     tile_type, mode, tostring(mod.net ~= nil)))
-                if mode == 1 and mod.net and mod.net.send_to_server then
+                if mode == 1 and mod.net and mod.net.send then
                     -- 客户端：只发请求，世界修改由服务端权威执行
-                    mod.net.send_to_server("veinmine",
+                    mod.net.send("veinmine",
                         string.format("%d,%d,%d", i, j, tile_type))
                 else
                     chain_mine(i, j, tile_type, false)
@@ -412,11 +412,11 @@ function setup()
         return
     end
 
-    if mod.net and mod.net.on_receive then
-        mod.net.on_receive(on_server_receive)
+    if mod.net and mod.net.on then
+        mod.net.on("veinmine", on_server_receive)
         mod.info("已注册服务端连锁请求处理 (channel=veinmine)")
     else
-        mod.warn("当前加载器不支持 mod.net.on_receive，联机同步不可用")
+        mod.warn("当前加载器不支持 mod.net.on，联机同步不可用")
     end
 
     safe_hook(picktile, { prefix = picktile_prefix, postfix = picktile_postfix }, "Player.PickTile")
