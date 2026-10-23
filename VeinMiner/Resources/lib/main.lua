@@ -42,7 +42,7 @@ Android: 用 field_pointer + ptr_deref + mem_read_values 走 TileData 原生数�
 桌面端: field_pointer 返回 nil, 回退 Framing.GetTileSafely -> Tile.type。
 --]]
 
-mod.meta = { pkg_id = "lzup.lua.veinminer", version = "1.4.0" }
+mod.meta = { pkg_id = "lzup.lua.veinminer", version = "1.4.1" }
 
 local dkjson = require("dkjson")
 local patch = mod.patch
@@ -192,18 +192,27 @@ local chain_mine
 
 -- 服务端：处理客户端的连锁请求
 local function on_server_receive(channel, payload, player)
-    if channel ~= "veinmine" or type(payload) ~= "string" then return end
+    mod.info(("recv: channel=%s payload=%s player=%s"):format(
+        tostring(channel), tostring(payload), tostring(player)))
+    if channel ~= "veinmine" or type(payload) ~= "string" then
+        mod.warn("拒绝: channel/payload 不匹配")
+        return
+    end
     local sx, sy, st = payload:match("^(-?%d+),(-?%d+),(%d+)$")
-    if not sx then return end
+    if not sx then mod.warn("拒绝: payload 解析失败"); return end
     local x, y, tile_type = tonumber(sx), tonumber(sy), tonumber(st)
-    if not x or not y or not tile_type then return end
-    if not is_vein_type(tile_type) then return end
+    if not is_vein_type(tile_type) then
+        mod.warn("拒绝: 类型不在白名单 type=" .. tostring(tile_type))
+        return
+    end
     if not player_near(player, x, y) then
-        mod.warn("拒绝越界连锁请求: player=" .. tostring(player)
+        mod.warn("拒绝: 玩家距离过远 player=" .. tostring(player)
             .. " 目标=(" .. x .. "," .. y .. ")")
         return
     end
+    mod.info(("服务端连锁开始 (%d,%d) type=%d"):format(x, y, tile_type))
     chain_mine(x, y, tile_type, false)
+    mod.info("服务端连锁结束")
 end
 
 chain_mine = function(ox, oy, tile_type, no_item)
@@ -266,6 +275,8 @@ local function picktile_postfix(instance, args, result)
             if tile_type ~= 0 and tile_type < 4096 and is_vein_type(tile_type) then
                 -- 现读模式：启动时还是单机，加入服务器后才是 1
                 local mode = (mod.net and mod.net.mode and mod.net.mode()) or 0
+                mod.info(("mine: type=%d mode=%d has_net=%s"):format(
+                    tile_type, mode, tostring(mod.net ~= nil)))
                 if mode == 1 and mod.net and mod.net.send_to_server then
                     -- 客户端：只发请求，世界修改由服务端权威执行
                     mod.net.send_to_server("veinmine",
